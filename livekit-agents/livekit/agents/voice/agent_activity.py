@@ -1324,7 +1324,11 @@ class AgentActivity(RecognitionHooks):
         if (
             not self._session.options.preemptive_generation
             or self._scheduling_paused
-            or (self._current_speech is not None and not self._current_speech.interrupted)
+            or (
+                self._current_speech is not None
+                and not self._current_speech.interrupted
+                and self._paused_speech is None
+            )
             or not isinstance(self.llm, llm.LLM)
         ):
             return
@@ -1441,6 +1445,12 @@ class AgentActivity(RecognitionHooks):
 
             if self._rt_session is not None:
                 self._rt_session.interrupt()
+
+        # refresh the preemptive generation's chat context after interrupting the
+        # current speech so the is_equivalent check compares against the up-to-date
+        # context (the interrupted speech's text is now committed)
+        if self._preemptive_generation is not None:
+            self._preemptive_generation.chat_ctx = self._agent.chat_ctx.copy()
 
         user_message = llm.ChatMessage(
             role="user",

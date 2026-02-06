@@ -624,6 +624,72 @@ async def test_interrupt_during_on_user_turn_completed(
     assert conversation_events[2].item.text_content == "Here is a story about a firefighter..."
 
 
+async def test_preemptive_generation_with_paused_speech() -> None:
+    """Test that preemptive generation fires when agent speech is paused
+    (via resume_false_interruption) during user interruption.
+
+    Timeline (simulated time):
+    - t≈0.6: agent starts speaking (from on_enter generate_reply)
+    - t=2.0-3.0: user speaks "Tell me a joke" while agent is speaking
+    - t≈2.5: agent speech is PAUSED (not interrupted) due to resume_false_interruption
+    - t=3.1: STT final transcript → on_preemptive_generation should fire
+    - t≈3.5: EOU fires → schedules speech using preemptive generation result
+
+    With preemptive gen (fixed): second speaking at ~4.4s
+    Without preemptive gen (bug): second speaking at ~4.8s
+    """
+    speed = 2.0
+    actions = FakeActions()
+
+    # Agent speaks on enter (long TTS so agent is still speaking when user interrupts)
+    actions.add_llm(
+        "Hello, how can I help you today?",
+        input="instructions:say hello to the user",
+        ttft=0.1,
+        duration=0.3,
+    )
+    actions.add_tts(5.0, ttfb=0.2)  # playout starts at ~0.6s
+
+    # User interrupts while agent is speaking
+    actions.add_user_speech(2.0, 3.0, "Tell me a joke", stt_delay=0.1)
+
+    # Second response after interruption
+    # Using duration=1.0 to amplify the timing difference between preemptive and non-preemptive
+    actions.add_llm("Here's a funny joke for you!", ttft=0.1, duration=1.0)
+    actions.add_tts(2.0, ttfb=0.3)
+
+    session = create_session(
+        actions,
+        speed_factor=speed,
+        extra_kwargs={
+            "preemptive_generation": True,
+            "resume_false_interruption": True,
+        },
+        pausable_audio=True,
+    )
+    agent = MyAgent(generate_reply_on_enter=True)
+
+    agent_state_events: list[AgentStateChangedEvent] = []
+    session.on("agent_state_changed", agent_state_events.append)
+
+    t_origin = await asyncio.wait_for(run_session(session, agent), timeout=SESSION_TIMEOUT)
+
+    speaking_events = [e for e in agent_state_events if e.new_state == "speaking"]
+    assert len(speaking_events) >= 2, (
+        f"Expected at least 2 speaking events, got {len(speaking_events)}: "
+        f"{[(e.old_state, e.new_state) for e in agent_state_events]}"
+    )
+
+    # The second speaking state should happen at ~4.4s (preemptive gen: LLM starts at 3.1)
+    # Without preemptive gen (bug), it would be at ~4.8s (LLM starts at EOU ~3.5)
+    check_timestamp(
+        speaking_events[1].created_at - t_origin,
+        t_target=4.4,
+        speed_factor=speed,
+        max_abs_diff=0.3,
+    )
+
+
 # helpers
 
 
